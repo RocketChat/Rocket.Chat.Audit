@@ -1,0 +1,5 @@
+[production]
+rocketchat-prod
+
+[development]
+rocketchat-dev

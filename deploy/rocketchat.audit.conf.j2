@@ -1,0 +1,12 @@
+#!upstart
+
+description "start the Rocket.Chat.Audit service"
+
+setuid {{ user }}
+setgid {{ group }}
+
+# delay startup until after pam/ldap daemon
+start on stopped rc
+stop on shutdown
+
+exec /usr/bin/python {{ script_bin_dir }}/rocketchat.audit.py -o {{ audit_dir }} -f {{ file_store }} -a {{ file_archive }} {% if master_slave %}-m{% endif %} {% if verbosity > 0 %}-{% for n in range(verbosity) %}v{% endfor %}{% endif %}
