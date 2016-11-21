@@ -1,2 +1,4 @@
+docopt
 pymongo>=3.2
 filecachetools
+pytz

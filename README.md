@@ -3,28 +3,26 @@
 Rocket.Chat.Audit is an application and library to inspect and record all
 Rocket.Chat communications as required by your Compliance Department.
 
-Out of the box, this application writes all audit files locally. It is expected
+Out of the box, this application writes all audit logs to MongoDB. It is expected
 that a batch process will regularly import them into downstream auditing systems.
+
+Rocket.Chat supports a "Keep Message History" setting but it loses the intermediate
+timestamps for all edits, which doesn't meet most compliance requirements.
 
 If you need real-time journaling or have other audit requirements, it should be
 quite simple to fork and build on this framework. Patches are welcome. :)
 
 ## Configuration
 
+Rocket.Chat.Audit operates by tailing the oplog, intercepting new and updated messages
+as well as File Uploads, and logging them to a separate audit mongodb database.
+
 You can control how the oplog is tailed with the following common parameters:
 
 | Name            | Flag | Option           | Description                                             |
 | --------------- | ---- | ---------------- | ------------------------------------------------------- |
-| Master/Slave?   | `-m` | `--master-slave` | True if using master-slave oplog instead of replica set |
+| Host Name       | `-H` | `--host`         | MongoDB hostname or URI; defaults to localhost          |
 
-
-There are three parameters for file-based auditing:
-
-| Name            | Flag | Option           | Description                                             |
-| --------------- | ---- | ---------------- | ------------------------------------------------------- |
-| Audit Directory | `-o` | `--output`       | Directory in which per-room audit logs should be stored |
-| File Store      | `-f` | `--file-store`   | Rocket.Chat File Upload file system path configuration  |
-| File Archive    | `-a` | `--file-archive` | Directory where File Uploads should be copied for archiving |
 
 ## Installation
 
@@ -63,7 +61,7 @@ out of the box but can configured however you want. The can all be configured in
 
 3. Make sure you have a public key on each host in your inventory for `remote_user`.
 
-4. Customize `config.yaml` for your installation.
+4. Customize `config.yaml` for your installation. Options should be intuitive.
 
 5. To deploy to a specific environment `env`, run
 

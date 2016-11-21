@@ -5,7 +5,7 @@ env: "development"
 # rocketchat.audit parameters
 audit_dir: "/var/lib/rocketchat.audit/chats"
 file_archive: "/var/lib/rocketchat.audit/filearchive/"
-# MUST match your Rocket.Chat configuration for File Upload file system path
+# MUST be "gridfs" OR match your Rocket.Chat configuration for File Upload file system path
 file_store: "/var/lib/rocketchat.filestore/"
 master_slave: false
 verbosity: 0
