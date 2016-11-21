@@ -32,7 +32,7 @@ import sys
 import time
 import traceback
 
-from cachetools import LRUCache
+from filecachetools import LRUCache
 import pymongo
 
 
@@ -43,13 +43,14 @@ class Auditor(object):
     Passes each event to the appropriate AuditHandler callback.
     """
 
-    def __init__(self, handler):
+    def __init__(self, handler, cache_size=10000):
         self.handler = handler
         self.logger = logging.getLogger(self.__class__.__name__)
         # this cache exists because only changed data is replicated in the oplog
         # the room ID is never changed, so we have to map to the message ID
         # the editedBy username isn't changed if you edit multiple times, so we need that too
-        self.cache = LRUCache(maxsize=10000)  # message _id => (room rid, editedBy username)
+        # format: message _id => (room rid, editedBy username)
+        self.cache = LRUCache(name='rocketchat_audit_messages', maxsize=cache_size)
 
     def tail_latest(self, oplog):
         first = oplog.find().sort('$natural', pymongo.DESCENDING).limit(-10).next()
@@ -76,14 +77,14 @@ class Auditor(object):
             self.logger.info("UPDATE %s", doc)
             s = o['$set']
             msg_id = doc['o2']['_id']
-            # cache doesn't persist across restarts, so we need to have a default
+            # cache persists across restarts but messages eventually evicted, so we need a default
             rid, edited_by = self.cache.get(msg_id, ('#unknown', 'unknown.user'))
             edited_by = s['editedBy']['username'] if 'editedBy' in s else edited_by
             self.cache[msg_id] = (rid, edited_by)  # so edits know the room for each message
             self.handler.on_message(rid, str(s['editedAt']), edited_by, s['msg'])
         # upload a file attachment
         elif ns.endswith("rocketchat_message") and "attachments" in o:
-            self.logger.info("FILE", doc)
+            self.logger.info("FILE %s", doc)
             title = o['attachments'][0]['title']
             self.handler.on_file(o['rid'], str(o['ts']), o['u']['username'], title,
                                  o['file']['_id'], o['attachments'][0]['image_type'])
@@ -140,12 +141,11 @@ class FileAuditHandler(AuditHandler):
             target.write("%s %s: %s\n" % (ts, username, msg))
 
 
-def main(audit_dir, file_store, file_archive, is_master_slave):
+def main(audit_dir, file_store, file_archive, is_master_slave, host):
     print {"audit_dir": audit_dir, "file_store": file_store, "file_archive": file_archive}
-    handler = FileAuditHandler(audit_dir, file_store, file_archive)
-    auditor = Auditor(handler)
+    c = pymongo.MongoClient(host)
 
-    c = pymongo.MongoClient()
+    auditor = Auditor(FileAuditHandler(audit_dir, file_store, audit_dir))
     oplog = c.local.oplog['$main'] if is_master_slave else c.local.oplog.rs
 
     while True:
@@ -163,20 +163,21 @@ AUDIT_FILE_UPLOAD_DIRECTORY = "/var/lib/rocketchat.audit/filearchive/"
 AUDIT_CHAT_DIRECTORY = "/var/lib/rocketchat.audit/chats/"
 
 if __name__ == '__main__':
+    norm = lambda d: os.path.join(d, '')  # normalize directory so that it ends with a slash
     parser = argparse.ArgumentParser(description='Audit Rocket.Chat Communications')
-    parser.add_argument('-o', '--output', dest='audit_dir', default=AUDIT_CHAT_DIRECTORY,
+    parser.add_argument('-o', '--output', dest='audit_dir', type=norm, default=AUDIT_CHAT_DIRECTORY,
                         help='Directory in which per-room audit logs should be stored')
-    parser.add_argument('-f', '--file-store', default=ROCKETCHAT_FILE_UPLOAD_DIRECTORY,
+    parser.add_argument('-f', '--file-store', type=norm, default=ROCKETCHAT_FILE_UPLOAD_DIRECTORY,
                         help='Rocket.Chat File Upload file system path configuration')
-    parser.add_argument('-a', '--file-archive', default=AUDIT_FILE_UPLOAD_DIRECTORY,
+    parser.add_argument('-a', '--file-archive', type=norm, default=AUDIT_FILE_UPLOAD_DIRECTORY,
                         help='Directory where File Uploads should be copied for archiving')
     parser.add_argument('-m', '--master-slave', action='store_true',
                         help='True if using master-slave oplog instead of replica set')
+    parser.add_argument('-H', '--host', help='MongoDB hostname or URI')
     parser.add_argument('-v', '--verbose', action='count', help='verbose output')
     args = parser.parse_args()
 
     log_format = '%(asctime)s %(levelname)s: %(message)s'
     level = [logging.WARNING, logging.INFO, logging.DEBUG][args.verbose or 0]
     logging.basicConfig(level=level, format=log_format, stream=sys.stderr)
-    norm = lambda d: os.path.join(d, '')  # normalize directory so that it ends with a slash
-    main(norm(args.audit_dir), norm(args.file_store), norm(args.file_archive), args.master_slave)
+    main(args.audit_dir, args.file_store, args.file_archive, args.master_slave, args.host)
