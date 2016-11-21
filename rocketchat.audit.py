@@ -33,6 +33,7 @@ import time
 import traceback
 
 from filecachetools import LRUCache
+from gridfs import GridFS
 import pymongo
 
 
@@ -105,21 +106,21 @@ class AuditHandler(object):
         pass
 
 
-class FileAuditHandler(AuditHandler):
+class LoggingAuditHandler(AuditHandler):
     """
     AuditHandler which writes one file per chat room (channel, private group, or direct message),
     journals all file uploads to a special file, and copies all files to an archive directory.
     """
 
-    def __init__(self, audit_dir, file_store, file_archive, file_journal='file_uploads'):
+    def __init__(self, file_upload_reader, audit_dir, file_archive, file_journal='file_uploads'):
         """
+        :param file_upload_reader: archives File Uploads from storage for auditing
         :param audit_dir: directory in which to store per-room audit logs
-        :param file_store: Rocket.Chat File Upload file system path configuration
         :param file_archive: directory to which File Uploads should be copied for archiving
         :param file_journal: file to which to record File Uploads
         """
+        self.file_upload_reader = file_upload_reader
         self.audit_dir = audit_dir
-        self.file_store = file_store
         self.file_archive = file_archive
         self.file_journal = file_journal
 
@@ -133,19 +134,70 @@ class FileAuditHandler(AuditHandler):
         # log file uploads both to the room and the file_journal
         self._log(room_id, ts, username, message)
         self._log(self.file_journal, ts, username, message)
-        # copy the file from Rocket.Chat's file store to the file archive
-        shutil.copy(self.file_store + filename, self.file_archive + filename)
+        # copy the actual file data
+        self._archive_file_uploads(filename)
+
+    def _archive_file_uploads(self, filename):
+        with self.file_upload_reader.get(filename) as fsrc:
+            with open(self.file_archive + filename, 'wb') as fdst:
+                shutil.copyfileobj(fsrc, fdst)
 
     def _log(self, filename, ts, username, msg):
         with open("%s%s" % (self.audit_dir, filename), 'a') as target:
             target.write("%s %s: %s\n" % (ts, username, msg))
 
 
+class UploadReader(object):
+    """
+    Base class for UploadReaders which support different RocketChat File Upload Storage Types.
+    """
+    __metaclass__ = ABCMeta
+
+    @abstractmethod
+    def get(self, filename):
+        pass
+
+
+class FileSystemUploadReader(UploadReader):
+    """
+    Use when RocketChat configured for File Upload > Storage Type = FileSystem.
+    """
+
+    def __init__(self, file_store):
+        """
+        :param file_store: Rocket.Chat File Upload file system path configuration
+        """
+        self.file_store = file_store
+
+    def get(self, filename):
+        # copy the file from Rocket.Chat's file store to the file archive
+        return open(self.file_store + filename, 'rb')
+
+
+class GridfsUploadReader(UploadReader):
+    """
+    Use when RocketChat configured for File Upload > Storage Type = GridFS
+    """
+    def __init__(self, grid):
+        """
+        :param grid: GridFS instance to which Rocket.Chat File Uploads are written
+        """
+        self.grid = grid
+
+    def get(self, filename):
+        return self.grid.get(os.path.splitext(filename)[0])
+
+
 def main(audit_dir, file_store, file_archive, is_master_slave, host):
     print {"audit_dir": audit_dir, "file_store": file_store, "file_archive": file_archive}
     c = pymongo.MongoClient(host)
 
-    auditor = Auditor(FileAuditHandler(audit_dir, file_store, audit_dir))
+    if file_store == "gridfs/": # trailing slash because we normalized as a path
+        upload_reader = GridfsUploadReader(GridFS(c['rocketchat'], collection='rocketchat_uploads'))
+    else:
+        upload_reader = FileSystemUploadReader(file_store)
+
+    auditor = Auditor(LoggingAuditHandler(upload_reader, audit_dir, file_archive))
     oplog = c.local.oplog['$main'] if is_master_slave else c.local.oplog.rs
 
     while True:
@@ -168,12 +220,12 @@ if __name__ == '__main__':
     parser.add_argument('-o', '--output', dest='audit_dir', type=norm, default=AUDIT_CHAT_DIRECTORY,
                         help='Directory in which per-room audit logs should be stored')
     parser.add_argument('-f', '--file-store', type=norm, default=ROCKETCHAT_FILE_UPLOAD_DIRECTORY,
-                        help='Rocket.Chat File Upload file system path configuration')
+                        help='Either "gridfs" or File Upload > File System > System Path value')
     parser.add_argument('-a', '--file-archive', type=norm, default=AUDIT_FILE_UPLOAD_DIRECTORY,
                         help='Directory where File Uploads should be copied for archiving')
     parser.add_argument('-m', '--master-slave', action='store_true',
                         help='True if using master-slave oplog instead of replica set')
-    parser.add_argument('-H', '--host', help='MongoDB hostname or URI')
+    parser.add_argument('-H', '--host', help='MongoDB hostname or URI; defaults to localhost')
     parser.add_argument('-v', '--verbose', action='count', help='verbose output')
     args = parser.parse_args()
 

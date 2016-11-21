@@ -16,6 +16,7 @@ You can control how the oplog is tailed with the following common parameters:
 | Name            | Flag | Option           | Description                                             |
 | --------------- | ---- | ---------------- | ------------------------------------------------------- |
 | Master/Slave?   | `-m` | `--master-slave` | True if using master-slave oplog instead of replica set |
+| Host Name       | `-H` | `--host`         | MongoDB hostname or URI; defaults to localhost          |
 
 
 There are three parameters for file-based auditing:
@@ -23,7 +24,7 @@ There are three parameters for file-based auditing:
 | Name            | Flag | Option           | Description                                             |
 | --------------- | ---- | ---------------- | ------------------------------------------------------- |
 | Audit Directory | `-o` | `--output`       | Directory in which per-room audit logs should be stored |
-| File Store      | `-f` | `--file-store`   | Rocket.Chat File Upload file system path configuration  |
+| File Store      | `-f` | `--file-store`   | "gridfs" or Rocket.Chat File Upload file system path    |
 | File Archive    | `-a` | `--file-archive` | Directory where File Uploads should be copied for archiving |
 
 ## Installation
