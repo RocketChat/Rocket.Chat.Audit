@@ -144,7 +144,7 @@ class Archiver(object):
         email['Subject'] = subject
         email['From'] = from_email
         email['To'] = to_email
-        email.preamble = preamble % timestring if "%s" in preamble else preamble
+        email.attach(MIMEText(preamble % timestring if "%s" in preamble else preamble))
         self._attach_chat_logs(email, timestring)
         self._attach_file_journal(email, timestring)
         return email
