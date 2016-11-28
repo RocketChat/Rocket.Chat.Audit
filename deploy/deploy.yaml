@@ -10,11 +10,8 @@
   - name: "Ensure directories exist with correct permissions"
     file: path={{ item }} state=directory owner={{ user }} group={{ group }} mode=0755
     with_items:
-    - "{{ audit_dir }}"
-    - "{{ file_store }}"
-    - "{{ file_archive }}"
-    - "{{ backup_dir }}"
-    - "{{ file_audit_dir }}"
+    - "{{ deploy_dir }}"
+    - "{{ log_dir }}"
 
   - name: "Install python dependencies"
     apt: name={{ item }} state=present
@@ -27,22 +24,22 @@
   - name: "Install rocketchat.audit dependencies"
     pip: requirements=/tmp/requirements.txt state=present
 
-  - name: "Deploy rocketchat.audit script"
-    copy: src=../rocketchat.audit.py dest={{ script_bin_dir }}/rocketchat.audit.py owner={{ user }} group={{ group }} mode=0755
+  - name: "Deploy rocketchat.audit service"
+    copy: src=../rocketchat.audit.py dest={{ deploy_dir }}/rocketchat.audit.py owner={{ user }} group={{ group }} mode=0755
     notify:
     - restart rocketchat.audit cron
-
-  - name: "Deploy rocketchat.audit service"
+  - name: "Deploy rocketchat.audit upstart"
     template: src=rocketchat.audit.conf.j2 dest=/etc/init/rocketchat.audit.conf
 
-  - name: "Deploy rocketchat.audit cron"
-    template: src=rocketchat.audit.cron.sh.j2 dest={{ cron_bin_dir }}/rocketchat.audit.cron.sh owner={{ user }} group={{ group }} mode=0755
+  - name: "Deploy rocketchat.audit inspector"
+    copy: src=../inspector.py dest={{ deploy_dir }}/inspector.py owner={{ user }} group={{ group }} mode=0755
   - name: "Configure rocketchat.audit crontab"
     cron: name=rocketchat.audit user={{ user }}
           minute={{ crontab.split(' ')[0] }} hour={{ crontab.split(' ')[1] }}
           day={{ crontab.split(' ')[2] }} month={{ crontab.split(' ')[3] }}
           weekday={{ crontab.split(' ')[4] }}
-          job="{{ cron_bin_dir }}/rocketchat.audit.cron.sh >> {{ audit_dir }}/cron.log"
+          job="{{ deploy_dir }}/inspector.py {% if cron_verbosity > 0 %}-{% for n in range(cron_verbosity) %}v{% endfor %}{% endif %} --time=-24h --from={{ from_email }} email {{ audit_email }} &> {{ log_dir }}/cron.log"
+
   - name: "Configure rocketchat.audit sudoers"
     template: src=rocketchat.audit.sudoers.j2 dest=/etc/sudoers.d/rocketchat-audit owner=root group=root mode=0440
 

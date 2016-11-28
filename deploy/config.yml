@@ -3,22 +3,17 @@
 env: "development"
 
 # rocketchat.audit parameters
-audit_dir: "/var/lib/rocketchat.audit/chats"
-file_archive: "/var/lib/rocketchat.audit/filearchive/"
-# MUST be "gridfs" OR match your Rocket.Chat configuration for File Upload file system path
-file_store: "/var/lib/rocketchat.filestore/"
-master_slave: false
-verbosity: 0
+service_verbosity: 0
 
 # cron job parameters
-backup_dir: "/var/lib/rocketchat.audit/backup"
-file_audit_dir: "/var/lib/rocketchat.audit/fileaudit"
 audit_email: "audit@example.com"
+from_email: "rocketchat@example.com"
 crontab: "55 23 * * *"
+cron_verbosity: 2
 
 # deployment parameters
-script_bin_dir: "/usr/local/bin"
-cron_bin_dir: "/usr/local/bin"
-user: "rocketchatsvc"
-group: "UnixUsers"
+deploy_dir: "/usr/local/bin/rocketchat.audit"
+log_dir: "/var/log/rocketchat"
+user: "rocketchat"
+group: "rocketchat"
 remote_user: "release"
