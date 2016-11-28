@@ -19,9 +19,9 @@
 Rocket.Chat.Auditor Inspector.
 
 Usage:
-  inspector.py [--host=<rocketchat_host>] [--time=<timestring>] logs
-  inspector.py [--host=<rocketchat_host>] [--time=<timestring>] files
-  inspector.py [--host=<rocketchat_host>] [--time=<timestring>] [--from=<addr>] [--dry-run] email <address>
+  inspector.py [-v | -vv] [--host=<rocketchat_host>] [--time=<timestring>] logs
+  inspector.py [-v | -vv] [--host=<rocketchat_host>] [--time=<timestring>] files
+  inspector.py [-v | -vv] [--host=<rocketchat_host>] [--time=<timestring>] [--from=<addr>] [--dry-run] email <address>
   inspector.py (-h | --help)
   inspector.py --version
 
@@ -29,12 +29,13 @@ Positional Arguments:
   address           Send audit logs to this email address.
 
 Options:
+  -H --host=<host>  Rocket.Chat hostname or MongoDB URI. [default: localhost]
   -t --time=<time>  String like "today" or "-24h" or "2016-10-11,2016-10-13" [default: today].
   -f --from=<addr>  Address from which to send email [default: rocketchat@localhost].
+  -d --dry-run      Run the operation in dry-run mode (e.g., print email rather than sending it)
+  -v --verbose      Show verbose output during execution.
   -h --help         Show this screen.
   -V --version      Show the version.
-  -H --host=<host>  Rocket.Chat hostname or MongoDB URI. [default: localhost]
-  -d --dry-run      Run the operation in dry-run mode (e.g., print email rather than sending it)
 """
 
 from bson import json_util
@@ -46,10 +47,12 @@ from email.mime.text import MIMEText
 from gridfs import GridFS
 from itertools import imap, groupby
 import json
+import logging
 import pymongo
 import pytz
 import re
 import smtplib
+import sys
 
 
 class Inspector(object):
@@ -100,6 +103,7 @@ class Archiver(object):
 
     def __init__(self, inspector):
         self.inspector = inspector
+        self.logger = logging.getLogger(self.__class__.__name__)
 
     def send_email(self,
                    timestring,
@@ -109,9 +113,8 @@ class Archiver(object):
                    preamble="Archives for %s attached",
                    dry_run=False):
         email = self._prepare_email(timestring, from_email, to_email, subject, preamble)
-        if dry_run:
-            print email.as_string()
-        else:
+        self.logger.info("Sending email to %s\n%s" % (to_email, self._indent(email.as_string())))
+        if not dry_run:
             self._send_email(email, from_email, to_email)
 
     # PUBLIC HELPERS
@@ -169,6 +172,12 @@ class Archiver(object):
         s.sendmail(from_addr, [to_addr], msg.as_string())
         s.quit()
 
+    @staticmethod
+    def _indent(text, prefix='\t'):
+        # unfortunately textwrap#indent only added in python 3.3
+        # https://github.com/python/cpython/blob/master/Lib/textwrap.py#L467
+        return ''.join([prefix + line for line in text.splitlines(True)])
+
 
 def to_json(l):
     return json.dumps(list(l), indent=2, default=json_util.default)
@@ -194,4 +203,7 @@ def main(rocketchat_host, timestring, arguments):
 
 if __name__ == '__main__':
     arguments = docopt(__doc__, version='Rocket.Chat.Audit Inspector 1.0')
+    level = [logging.WARNING, logging.INFO, logging.DEBUG][arguments['--verbose']]
+    log_format = '%(asctime)s %(levelname)s: %(message)s'
+    logging.basicConfig(level=level, format=log_format, stream=sys.stderr)
     main(arguments['--host'], arguments['--time'], arguments)
