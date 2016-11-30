@@ -70,8 +70,7 @@ class Inspector(object):
         self.files = files
 
     def list_files(self, timestring):
-        return imap(lambda f: f.filename,
-                    self.files.find({"uploadDate": self._timestring_to_query(timestring)}))
+        return self.files.find({"uploadDate": self._timestring_to_query(timestring)})
 
     def list_logs(self, timestring):
         return self.messages.find({"ts": self._timestring_to_query(timestring)})
@@ -121,7 +120,12 @@ class Archiver(object):
     @staticmethod
     def print_msg(doc):
         ts = pytz.utc.localize(doc['ts']).astimezone(pytz.timezone("US/Central"))
-        return "%s %s: %s" % (ts.isoformat(), doc['username'], doc['msg'])
+        return ("%s %s: %s" % (ts.isoformat(), doc['username'], doc['msg'])).encode('utf-8')
+
+    @staticmethod
+    def print_file(f):
+        ts = pytz.utc.localize(f.upload_date).astimezone(pytz.timezone("US/Central"))
+        return "%s: %s" % (ts.isoformat(), f.filename)
 
     @staticmethod
     def group_by(data, key_func):
@@ -151,7 +155,7 @@ class Archiver(object):
             yield room_name, MIMEText("\n".join(imap(self.print_msg, room_log)))
 
     def _build_file_logs(self, timestring):
-        files = "\n".join(self.inspector.list_files(timestring))
+        files = "\n".join(imap(self.print_file, self.inspector.list_files(timestring)))
         if files:
             yield "file_uploads", MIMEText(files)
 
@@ -180,9 +184,7 @@ def main(rocketchat_host, timestring, arguments):
     inspector = Inspector(client['rocketchat_audit']['messages'], grid)
 
     if arguments['files']:
-        def print_files(doc):
-            return doc
-        print to_json(imap(print_files, inspector.list_files(timestring)))
+        print to_json(imap(Archiver.print_file, inspector.list_files(timestring)))
     elif arguments['logs']:
         logs = Archiver.group_by(inspector.list_logs(timestring), lambda e: e['room_name'])
         print json.dumps({k: map(Archiver.print_msg, v) for k, v in logs.iteritems()}, indent=2)
