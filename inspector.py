@@ -42,7 +42,6 @@ from bson import json_util
 from datetime import datetime
 from datetime import timedelta
 from docopt import docopt
-from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from gridfs import GridFS
 from itertools import imap, groupby
@@ -107,15 +106,15 @@ class Archiver(object):
 
     def send_email(self,
                    timestring,
-                   from_email,
-                   to_email,
-                   subject="Rocket.Chat.Archive",
-                   preamble="Archives for %s attached",
+                   from_addr,
+                   to_addr,
+                   subject="Rocket.Chat.Archive for %s",
                    dry_run=False):
-        email = self._prepare_email(timestring, from_email, to_email, subject, preamble)
-        self.logger.info("Sending email to %s\n%s" % (to_email, self._indent(email.as_string())))
-        if not dry_run:
-            self._send_email(email, from_email, to_email)
+        emails = self._prepare_emails(timestring, from_addr, to_addr, subject)
+        for email in emails:
+            self.logger.info("Sending email to %s\n%s" % (to_addr, self._indent(email.as_string())))
+            if not dry_run:
+                self._send_email(email, from_addr, to_addr)
 
     # PUBLIC HELPERS
 
@@ -134,35 +133,27 @@ class Archiver(object):
 
     # PRIVATE
 
-    def _prepare_email(self,
-                       timestring,
-                       from_email,
-                       to_email,
-                       subject="Rocket.Chat.Archive",
-                       preamble="Archives for %s attached",):
-        email = MIMEMultipart()
-        email['Subject'] = subject
-        email['From'] = from_email
-        email['To'] = to_email
-        email.attach(MIMEText(preamble % timestring if "%s" in preamble else preamble))
-        self._attach_chat_logs(email, timestring)
-        self._attach_file_journal(email, timestring)
-        return email
+    def _prepare_emails(self, timestring, from_email, to_email, subject):
+        chat_logs = list(self._build_chat_logs(timestring))
+        file_logs = list(self._build_file_logs(timestring))
+        emails = []
+        for name, payload in chat_logs + file_logs:
+            payload['Subject'] = subject % name if "%s" in subject else subject
+            payload['From'] = from_email
+            payload['To'] = to_email
+            emails.append(payload)
+        return emails
 
-    def _attach_chat_logs(self, email, timestring):
+    def _build_chat_logs(self, timestring):
         logs = self.group_by(self.inspector.list_logs(timestring), lambda e: e['room_name'])
         for room_name, room_log in logs.iteritems():
             # stop delaying the inevitable: read all the logs into memory for the email
-            attachment = MIMEText("\n".join(imap(self.print_msg, room_log)))
-            attachment.add_header('Content-Disposition', 'attachment',
-                                  filename="%s.txt" % room_name)
-            email.attach(attachment)
+            yield room_name, MIMEText("\n".join(imap(self.print_msg, room_log)))
 
-    def _attach_file_journal(self, email, timestring):
-        files = self.inspector.list_files(timestring)
-        files_attachment = MIMEText("\n".join(files))
-        files_attachment.add_header('Content-Disposition', 'attachment', filename="files.txt")
-        email.attach(files_attachment)
+    def _build_file_logs(self, timestring):
+        files = "\n".join(self.inspector.list_files(timestring))
+        if files:
+            yield "file_uploads", MIMEText(files)
 
     # PRIVATE HELPERS
 
