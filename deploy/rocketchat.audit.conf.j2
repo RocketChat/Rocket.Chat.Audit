@@ -9,4 +9,4 @@ setgid {{ group }}
 start on stopped rc
 stop on shutdown
 
-exec /usr/bin/python {{ script_bin_dir }}/rocketchat.audit.py -o {{ audit_dir }} -f {{ file_store }} -a {{ file_archive }} {% if master_slave %}-m{% endif %} {% if verbosity > 0 %}-{% for n in range(verbosity) %}v{% endfor %}{% endif %}
+exec /usr/bin/python {{ script_bin_dir }}/rocketchat.audit.py {% if service_verbosity > 0 %}-{% for n in range(service_verbosity) %}v{% endfor %}{% endif %}

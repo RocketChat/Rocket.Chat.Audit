@@ -25,14 +25,15 @@ Tails the MongoDB oplog for efficient real-time auditing.
 from abc import abstractmethod
 from abc import ABCMeta
 import argparse
+from datetime import datetime
 import logging
-import os.path
-import shutil
+import operator
 import sys
 import time
 import traceback
 
-from cachetools import LRUCache
+from filecachetools import LRUCache, cachedmethod
+from gridfs import GridFS
 import pymongo
 
 
@@ -43,13 +44,15 @@ class Auditor(object):
     Passes each event to the appropriate AuditHandler callback.
     """
 
-    def __init__(self, handler):
+    def __init__(self, rocketchat, handler, message_cache_size=10000):
+        self.rocketchat = rocketchat
         self.handler = handler
         self.logger = logging.getLogger(self.__class__.__name__)
-        # this cache exists because only changed data is replicated in the oplog
+        # this cache exists for edits -- only changed data is replicated in the oplog
         # the room ID is never changed, so we have to map to the message ID
         # the editedBy username isn't changed if you edit multiple times, so we need that too
-        self.cache = LRUCache(maxsize=10000)  # message _id => (room rid, editedBy username)
+        # format: message _id => (room rid, editedBy username)
+        self.message_cache = LRUCache(name='rocketchat_audit_messages', maxsize=message_cache_size)
 
     def tail_latest(self, oplog):
         first = oplog.find().sort('$natural', pymongo.DESCENDING).limit(-10).next()
@@ -69,24 +72,57 @@ class Auditor(object):
         # insert a new message
         if doc['op'] == 'i' and ns.endswith("rocketchat_message") and o.get('msg', False):
             self.logger.info("INSERT %s", doc)
-            self.cache[o['_id']] = (o['rid'], None)  # so edits know the room for each message
-            self.handler.on_message(o['rid'], str(o['ts']), o['u']['username'], o['msg'])
+            room_name = self.rocketchat.get_room_name(o['rid'])
+            self.handler.on_message(o['rid'], room_name, str(o['ts']), o['u']['username'], o['msg'])
         # update an existing message
         elif doc['op'] == 'u' and ns.endswith("rocketchat_message"):
             self.logger.info("UPDATE %s", doc)
             s = o['$set']
             msg_id = doc['o2']['_id']
-            # cache doesn't persist across restarts, so we need to have a default
-            rid, edited_by = self.cache.get(msg_id, ('#unknown', 'unknown.user'))
+            rid, room_name, edited_by = self.rocketchat.get_message_room_and_editor(msg_id)
             edited_by = s['editedBy']['username'] if 'editedBy' in s else edited_by
-            self.cache[msg_id] = (rid, edited_by)  # so edits know the room for each message
-            self.handler.on_message(rid, str(s['editedAt']), edited_by, s['msg'])
+            self.message_cache[msg_id] = (rid, edited_by)  # so edits know the room for each msg
+            room_name = self.rocketchat.get_room_name(o['rid'])
+            self.handler.on_message(rid, room_name, str(s['editedAt']), edited_by, s['msg'])
         # upload a file attachment
         elif ns.endswith("rocketchat_message") and "attachments" in o:
-            self.logger.info("FILE", doc)
+            self.logger.info("FILE %s", doc)
             title = o['attachments'][0]['title']
-            self.handler.on_file(o['rid'], str(o['ts']), o['u']['username'], title,
+            room_name = self.rocketchat.get_room_name(o['rid'])
+            self.handler.on_file(o['rid'], room_name, str(o['ts']), o['u']['username'], title,
                                  o['file']['_id'], o['attachments'][0]['image_type'])
+
+
+class RocketChat(object):
+    """
+    Queries RocketChat via direct access to the database using a read-through cache pattern.
+    """
+
+    def __init__(self, rocketchat_db, room_cache_size=10000, message_cache_size=10000):
+        self.rooms = rocketchat_db['rocketchat_room']
+        self.messages = rocketchat_db['message']
+        self.room_cache = LRUCache(name='rocketchat_audit_rooms', maxsize=room_cache_size)
+        self.message_cache = LRUCache(name='rocketchat_audit_messages', maxsize=message_cache_size)
+
+    @cachedmethod(operator.attrgetter('room_cache'))
+    def get_room_name(self, room_id):
+        room = self.rooms.find_one({"_id": room_id})
+        # channels and private groups (t: c and t: p)
+        if "name" in room:
+            return room['name']
+        # direct messages
+        if room['t'] == "d":
+            return "_x_".join(room['usernames'])
+
+    @cachedmethod(operator.attrgetter('message_cache'))
+    def get_message_room_and_editor(self, message_id):
+        """
+        # cache persists across restarts and reads-through to DB if evicted
+        """
+        # message = self.messages.find_one({"_id": message_id})
+        # room_name = self.get_room_name(message['room_id'])
+        # return {"room_name": room_name, "editedBy": message['editedBy']}
+        pass
 
 
 class AuditHandler(object):
@@ -96,57 +132,60 @@ class AuditHandler(object):
     __metaclass__ = ABCMeta
 
     @abstractmethod
-    def on_message(self, room_id, ts, username, msg):
+    def on_message(self, room_id, room_name, ts, username, msg):
         pass
 
     @abstractmethod
-    def on_file(self, room_id, ts, username, title, file_id, image_type):
+    def on_file(self, room_id, room_name, ts, username, title, file_id, image_type):
         pass
 
 
-class FileAuditHandler(AuditHandler):
+class MongoLoggingAuditHandler(AuditHandler):
     """
-    AuditHandler which writes one file per chat room (channel, private group, or direct message),
-    journals all file uploads to a special file, and copies all files to an archive directory.
+    AuditHandler which logs all messages to an audit mongodb database.
+
+    All messages are logged across all chat rooms (channel, private group, or direct message).
+    Files are also copied to the audit db.
+
+    There are two collections:
+    - messages: contains a document for all messages (inserts and updates) across all rooms
+    - files: contains the gridfs representations of all File Uploads
     """
 
-    def __init__(self, audit_dir, file_store, file_archive, file_journal='file_uploads'):
+    def __init__(self, rocketchat_db, audit_db):
         """
-        :param audit_dir: directory in which to store per-room audit logs
-        :param file_store: Rocket.Chat File Upload file system path configuration
-        :param file_archive: directory to which File Uploads should be copied for archiving
-        :param file_journal: file to which to record File Uploads
+        :param rocketchat_db: the mongodb audit log
+        :param audit_db: the mongodb database used for writing audit logs
         """
-        self.audit_dir = audit_dir
-        self.file_store = file_store
-        self.file_archive = file_archive
-        self.file_journal = file_journal
+        self.rocketchat_gridfs = GridFS(rocketchat_db, collection='rocketchat_uploads')
+        self.audit_gridfs = GridFS(audit_db, collection='file_uploads')
+        self.messages = audit_db['messages']
 
-    def on_message(self, room_id, ts, username, msg):
-        self._log(room_id, ts, username, msg)
+    def on_message(self, room_id, room_name, ts, username, msg):
+        self._log(room_id, room_name, ts, username, msg)
 
-    def on_file(self, room_id, ts, username, title, file_id, image_type):
-        ext = image_type.split("/")[1]
-        filename = "%s.%s" % (file_id, ext)
-        message = "%s %s" % (title, filename)
-        # log file uploads both to the room and the file_journal
-        self._log(room_id, ts, username, message)
-        self._log(self.file_journal, ts, username, message)
-        # copy the file from Rocket.Chat's file store to the file archive
-        shutil.copy(self.file_store + filename, self.file_archive + filename)
+    def on_file(self, room_id, room_name, ts, username, title, file_id, image_type):
+        message = "%s [%s %s]" % (title, file_id, image_type)
+        self._log(room_id, room_name, ts, username, message)
+        self._archive_file_uploads(file_id, title)
 
-    def _log(self, filename, ts, username, msg):
-        with open("%s%s" % (self.audit_dir, filename), 'a') as target:
-            target.write("%s %s: %s\n" % (ts, username, msg))
+    def _archive_file_uploads(self, file_id, title):
+        uploaded_file = self.rocketchat_gridfs.get(file_id)
+        self.audit_gridfs.put(uploaded_file, filename=title,
+                              content_type=uploaded_file.content_type)
+
+    def _log(self, room_id, room_name, ts, username, msg):
+        ts = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S.%f")
+        self.messages.insert({"room_id": room_id, "room_name": room_name,
+                              "ts": ts, "username": username, "msg": msg})
 
 
-def main(audit_dir, file_store, file_archive, is_master_slave):
-    print {"audit_dir": audit_dir, "file_store": file_store, "file_archive": file_archive}
-    handler = FileAuditHandler(audit_dir, file_store, file_archive)
-    auditor = Auditor(handler)
-
-    c = pymongo.MongoClient()
-    oplog = c.local.oplog['$main'] if is_master_slave else c.local.oplog.rs
+def main(host):
+    client = pymongo.MongoClient(host)
+    rocketchat = RocketChat(client['rocketchat'])
+    handler = MongoLoggingAuditHandler(client['rocketchat'], client['rocketchat_audit'])
+    auditor = Auditor(rocketchat, handler)
+    oplog = client.local.oplog.rs
 
     while True:
         try:
@@ -156,27 +195,13 @@ def main(audit_dir, file_store, file_archive, is_master_slave):
             traceback.print_exc(e)
 
 
-# MUST match your Rocket.Chat configuration for File Upload file system path
-ROCKETCHAT_FILE_UPLOAD_DIRECTORY = "/var/lib/rocketchat.filestore/"
-
-AUDIT_FILE_UPLOAD_DIRECTORY = "/var/lib/rocketchat.audit/filearchive/"
-AUDIT_CHAT_DIRECTORY = "/var/lib/rocketchat.audit/chats/"
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Audit Rocket.Chat Communications')
-    parser.add_argument('-o', '--output', dest='audit_dir', default=AUDIT_CHAT_DIRECTORY,
-                        help='Directory in which per-room audit logs should be stored')
-    parser.add_argument('-f', '--file-store', default=ROCKETCHAT_FILE_UPLOAD_DIRECTORY,
-                        help='Rocket.Chat File Upload file system path configuration')
-    parser.add_argument('-a', '--file-archive', default=AUDIT_FILE_UPLOAD_DIRECTORY,
-                        help='Directory where File Uploads should be copied for archiving')
-    parser.add_argument('-m', '--master-slave', action='store_true',
-                        help='True if using master-slave oplog instead of replica set')
+    parser.add_argument('-H', '--host', help='MongoDB hostname or URI; defaults to localhost')
     parser.add_argument('-v', '--verbose', action='count', help='verbose output')
     args = parser.parse_args()
 
     log_format = '%(asctime)s %(levelname)s: %(message)s'
     level = [logging.WARNING, logging.INFO, logging.DEBUG][args.verbose or 0]
     logging.basicConfig(level=level, format=log_format, stream=sys.stderr)
-    norm = lambda d: os.path.join(d, '')  # normalize directory so that it ends with a slash
-    main(norm(args.audit_dir), norm(args.file_store), norm(args.file_archive), args.master_slave)
+    main(args.host)
